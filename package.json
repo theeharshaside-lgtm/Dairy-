@@ -1,0 +1,19 @@
+{
+  "name": "daily-dairy",
+  "version": "1.0.0",
+  "description": "Daily Dairy - Private shared ephemeral notebook for two",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node server/server.js",
+    "test": "node server/test_e2e.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.2.0",
+    "helmet": "^7.1.0",
+    "web-push": "^3.6.7"
+  }
+}

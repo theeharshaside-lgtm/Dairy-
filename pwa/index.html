@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Daily Dairy</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#FAF7F2">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+
+  <!-- Editorial typography: Cormorant Garamond display serif paired with Plus Jakarta Sans -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+  <!-- Main Diary View -->
+  <main class="notebook-page" id="diaryPage">
+    <!-- Header -->
+    <header class="header-bar">
+      <div class="brand" id="btnLock" title="Lock & Leave Diary">
+        <div class="brand-icon-wrap">
+          <svg class="brand-icon" viewBox="0 0 24 24">
+            <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>
+          </svg>
+        </div>
+        <div class="brand-text-wrap">
+          <span class="brand-title">Daily Dairy</span>
+          <span class="brand-sub">Private Notebook</span>
+        </div>
+      </div>
+
+      <!-- Real-Time Two-Person Presence Pill Indicator -->
+      <div class="presence-badge" id="presenceBadge" title="Two-Person Presence Status">
+        <span class="presence-dot connecting" id="presenceDot"></span>
+        <span class="presence-label" id="presenceLabel">Connecting...</span>
+      </div>
+
+      <div class="header-actions">
+        <button class="icon-btn" id="btnRefresh" title="Refresh diary" aria-label="Refresh diary">
+          <svg viewBox="0 0 24 24">
+            <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+          </svg>
+        </button>
+        <button class="icon-btn" id="btnSettings" title="Settings" aria-label="Settings">
+          <svg viewBox="0 0 24 24">
+            <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Discreet Push Notification Permission Banner -->
+    <div class="push-banner hidden" id="pushPromptBanner">
+      <div class="push-banner-inner">
+        <div class="push-banner-icon">
+          <svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
+        </div>
+        <div class="push-banner-text">
+          <strong>Quiet updates</strong>
+          <span>Receive a discreet notification when your partner writes an entry?</span>
+        </div>
+        <div class="push-banner-actions">
+          <button type="button" class="push-banner-btn-enable" id="btnPromptEnablePush">Enable</button>
+          <button type="button" class="push-banner-btn-dismiss" id="btnPromptDismissPush">Later</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Date Banner with Serif Typography -->
+    <div class="date-header">
+      <div class="date-text" id="dateText">Today</div>
+      <div class="salutation-text">Dear Diary,</div>
+    </div>
+
+    <!-- Plain Text & Media Entries Notebook Page -->
+    <div class="entries-container" id="entriesContainer">
+      <div class="empty-state" id="emptyState">
+        <div class="empty-icon-art">
+          <svg viewBox="0 0 48 48" fill="none">
+            <path d="M12 36V10C12 7.79086 13.7909 6 16 6H36V36H16C13.7909 36 12 36 12 36Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M12 36C12 38.2091 13.7909 40 16 40H36V36" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M18 14H30" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            <path d="M18 20H26" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="empty-text-wrap">
+          <p class="empty-title">The page is quiet</p>
+          <p class="empty-subtitle">Waiting for words from you or your partner...</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Floating Text & Media Editor Dock -->
+    <footer class="bottom-editor">
+      <!-- Attached media preview chip -->
+      <div class="attachment-preview hidden" id="attachmentPreview">
+        <span class="attachment-icon" id="attachmentIcon">📎</span>
+        <span class="attachment-label" id="attachmentLabel">Attached</span>
+        <button type="button" class="attachment-remove-btn" id="btnRemoveAttachment" title="Remove attachment" aria-label="Remove attachment">&times;</button>
+      </div>
+
+      <!-- Live Voice Recording Bar -->
+      <div class="recording-bar hidden" id="recordingBar">
+        <div class="recording-indicator">
+          <span class="recording-pulse"></span>
+          <span class="recording-time" id="recordingTimer">0:00</span>
+          <span class="recording-text">Recording voice note...</span>
+        </div>
+        <div class="recording-actions">
+          <button type="button" class="recording-btn-cancel" id="btnCancelVoice">Cancel</button>
+          <button type="button" class="recording-btn-done" id="btnStopVoice">Attach Note</button>
+        </div>
+      </div>
+
+      <!-- Editor Container Box -->
+      <div class="editor-box">
+        <!-- Attachment Picker Trigger -->
+        <button type="button" class="editor-icon-btn" id="btnAttachMedia" title="Attach photo or media" aria-label="Attach photo or media">
+          <svg viewBox="0 0 24 24">
+            <path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/>
+          </svg>
+        </button>
+
+        <!-- Voice Recorder Trigger -->
+        <button type="button" class="editor-icon-btn" id="btnVoiceRecord" title="Record voice note" aria-label="Record voice note">
+          <svg viewBox="0 0 24 24">
+            <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/>
+          </svg>
+        </button>
+
+        <input type="file" id="mediaFileInput" accept="image/*,video/*,audio/*" style="display:none">
+
+        <textarea class="editor-textarea" id="entryInput" placeholder="Write something in the diary..." rows="1"></textarea>
+        <button class="save-btn" id="btnSave" disabled>Save</button>
+      </div>
+    </footer>
+  </main>
+
+  <!-- Login Modal -->
+  <div class="modal-overlay hidden" id="loginModal">
+    <div class="modal-card">
+      <div class="modal-icon">
+        <svg viewBox="0 0 24 24">
+          <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>
+        </svg>
+      </div>
+      <h2 class="modal-title">Daily Dairy</h2>
+      <p class="modal-desc">A private, quiet notebook for two.</p>
+
+      <div class="form-group">
+        <label class="form-label">Username</label>
+        <input class="form-input" type="text" id="loginUsername" value="diary" autocomplete="username">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Password</label>
+        <input class="form-input" type="password" id="loginPassword" placeholder="••••••••" autocomplete="current-password">
+      </div>
+
+      <div class="error-text hidden" id="loginError"></div>
+
+      <button class="btn-primary" id="btnLoginSubmit">Unlock Diary</button>
+      <div class="notice-text">Default bootstrap: diary / ChangeThisOnFirstLogin!</div>
+    </div>
+  </div>
+
+  <!-- Mandatory Password Setup Modal -->
+  <div class="modal-overlay hidden" id="changePasswordModal">
+    <div class="modal-card">
+      <div class="modal-icon">
+        <svg viewBox="0 0 24 24">
+          <path d="M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/>
+        </svg>
+      </div>
+      <h2 class="modal-title">Setup Password</h2>
+      <p class="modal-desc">Before opening the shared diary, choose your private shared password.</p>
+
+      <div class="form-group">
+        <label class="form-label">New Password (min 8 chars)</label>
+        <input class="form-input" type="password" id="newPassword" autocomplete="new-password">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Confirm Password</label>
+        <input class="form-input" type="password" id="confirmPassword" autocomplete="new-password">
+      </div>
+
+      <div class="error-text hidden" id="changePassError"></div>
+
+      <button class="btn-primary" id="btnChangePassSubmit">Set Password & Open</button>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div class="modal-overlay hidden" id="settingsModal">
+    <div class="modal-card">
+      <div class="modal-header-row">
+        <h2 class="modal-title">Diary Settings</h2>
+        <button type="button" class="modal-close-icon-btn" id="btnCloseSettings" aria-label="Close settings">&times;</button>
+      </div>
+      <p class="modal-desc">Private notifications and connection details.</p>
+
+      <!-- Private Push Notifications Group -->
+      <div class="settings-group">
+        <div class="settings-group-header">
+          <span class="settings-group-title">Private Push Notifications</span>
+          <span class="push-status-badge" id="pushStatusBadge">Checking...</span>
+        </div>
+        <p class="settings-help">
+          Discreetly notifies your phone when a new text, voice note, or photo is written. Lock screen stays confidential with zero diary content revealed.
+        </p>
+
+        <div class="form-group" style="margin-top:10px;">
+          <label class="form-label">Recipient Display Name (optional)</label>
+          <input class="form-input" type="text" id="pushRecipientInput" placeholder="e.g. Honey, Alex, Love">
+          <span class="input-hint">Personalizes greeting discreetly (e.g. "Honey, you have a new entry")</span>
+        </div>
+
+        <div class="push-actions-row">
+          <button type="button" class="btn-push-toggle" id="btnTogglePush">Enable Notifications</button>
+          <button type="button" class="btn-push-test" id="btnTestPush">Send Test Push</button>
+        </div>
+      </div>
+
+      <!-- Remote Server URL Group -->
+      <div class="settings-group" style="margin-top:16px;">
+        <label class="form-label">Backend Server URL</label>
+        <input class="form-input" type="text" id="serverUrlInput" placeholder="Leave empty for current domain">
+        <span class="input-hint">Leave blank when using the deployed web app.</span>
+      </div>
+
+      <div class="privacy-notice">
+        • Read entries are permanently purged from both phones once the recipient leaves.<br>
+        • Two-person private presence updates automatically when either phone enters or leaves.<br>
+        • No permanent history, no contact lists, zero tracking.
+      </div>
+
+      <button class="btn-primary" id="btnSaveSettings">Save Settings</button>
+      <button class="btn-secondary" id="btnSettingsLock">Lock Diary & Leave</button>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "name": "daily-dairy-server",
+  "version": "1.0.0",
+  "description": "Private ephemeral notebook backend for two with atomic lifecycle auto-deletion",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test_e2e.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "express-rate-limit": "^7.2.0",
+    "bcryptjs": "^2.4.3"
+  }
+}

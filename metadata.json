@@ -1,0 +1,6 @@
+{
+  "name": "Daily Dairy",
+  "description": "A private, ephemeral shared digital diary for two with disappearing notebook entries and strict access control.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
