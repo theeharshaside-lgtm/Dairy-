@@ -6,7 +6,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { DatabaseSync } = require('node:sqlite');
+const { createClient } = require('@libsql/client');
 const webpush = require('web-push');
 
 const app = express();
@@ -16,10 +16,12 @@ const app = express();
 // In standard production hosting (Render, Railway, Fly.io, Cloud Run), PORT env var is respected directly.
 const isAiStudioContainer = fs.existsSync('/app/control-plane-api');
 let PORT = 3000;
-if (process.env.PORT && process.env.PORT !== '8080') {
-  PORT = parseInt(process.env.PORT, 10);
-} else if (isAiStudioContainer) {
-  PORT = parseInt(process.env.APP_PORT, 10) || 3000;
+if (isAiStudioContainer) {
+  if (process.env.PORT && process.env.PORT !== '8080') {
+    PORT = parseInt(process.env.PORT, 10);
+  } else {
+    PORT = parseInt(process.env.APP_PORT, 10) || 3000;
+  }
 } else if (process.env.PORT) {
   PORT = parseInt(process.env.PORT, 10);
 } else if (process.env.APP_PORT) {
@@ -33,106 +35,166 @@ if (!fs.existsSync(DATA_DIR)) {
 
 const DB_FILE = process.env.DB_FILE || path.join(DATA_DIR, 'daily_dairy.sqlite');
 
-// Initialize Production SQLite Database
-const db = new DatabaseSync(DB_FILE);
-db.exec('PRAGMA journal_mode = WAL;');
-db.exec('PRAGMA synchronous = NORMAL;');
-db.exec('PRAGMA foreign_keys = ON;');
+// Database Connection:
+// If TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are set, connects to remote Turso Cloud SQLite.
+// Otherwise, connects to local SQLite file for tests and offline development.
+const isTurso = Boolean(process.env.TURSO_DATABASE_URL && process.env.TURSO_AUTH_TOKEN);
+const dbUrl = isTurso ? process.env.TURSO_DATABASE_URL : (process.env.DB_URL || `file:${DB_FILE}`);
 
-// Create Schema
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    must_change_password INTEGER NOT NULL DEFAULT 1,
-    updated_at INTEGER NOT NULL
-  );
+const dbClient = createClient({
+  url: dbUrl,
+  authToken: isTurso ? process.env.TURSO_AUTH_TOKEN : undefined
+});
 
-  CREATE TABLE IF NOT EXISTS sessions (
-    token TEXT PRIMARY KEY,
-    device_id TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    last_seen_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS entries (
-    id TEXT PRIMARY KEY,
-    author_device_id TEXT NOT NULL,
-    content TEXT NOT NULL,
-    entry_type TEXT NOT NULL DEFAULT 'text',
-    media_url TEXT,
-    created_at INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'ACTIVE',
-    viewed_by_device_id TEXT,
-    viewed_at INTEGER,
-    consumed_at INTEGER
-  );
-
-  CREATE TABLE IF NOT EXISTS view_sessions (
-    device_id TEXT NOT NULL,
-    entry_id TEXT NOT NULL,
-    started_at INTEGER NOT NULL,
-    PRIMARY KEY (device_id, entry_id)
-  );
-
-  CREATE TABLE IF NOT EXISTS push_subscriptions (
-    endpoint TEXT PRIMARY KEY,
-    device_id TEXT NOT NULL,
-    p256dh TEXT NOT NULL,
-    auth TEXT NOT NULL,
-    recipient_name TEXT,
-    created_at INTEGER NOT NULL,
-    last_used_at INTEGER NOT NULL
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_entries_status ON entries(status, created_at);
-  CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
-  CREATE INDEX IF NOT EXISTS idx_push_device ON push_subscriptions(device_id);
-`);
-
-// Run graceful migrations on existing databases
-try {
-  db.exec("ALTER TABLE entries ADD COLUMN entry_type TEXT DEFAULT 'text';");
-} catch (e) {
-  // column already exists
-}
-try {
-  db.exec("ALTER TABLE entries ADD COLUMN media_url TEXT;");
-} catch (e) {
-  // column already exists
+if (isTurso) {
+  console.log('[Daily Dairy DB] Configured with Turso Cloud SQLite Database.');
+} else {
+  console.log(`[Daily Dairy DB] Configured with local SQLite file: ${dbUrl}`);
 }
 
-// Prepared Statements
-const stmtGetUser = db.prepare('SELECT * FROM users WHERE username = ? LIMIT 1;');
-const stmtInsertUser = db.prepare('INSERT INTO users (username, password_hash, must_change_password, updated_at) VALUES (?, ?, ?, ?);');
-const stmtUpdatePassword = db.prepare('UPDATE users SET password_hash = ?, must_change_password = ?, updated_at = ? WHERE username = ?;');
+// Database Initialization & Migrations
+async function initDatabase() {
+  try {
+    await dbClient.execute('PRAGMA foreign_keys = ON;').catch(() => {});
 
-const stmtGetSession = db.prepare('SELECT * FROM sessions WHERE token = ? LIMIT 1;');
-const stmtInsertSession = db.prepare('INSERT OR REPLACE INTO sessions (token, device_id, created_at, last_seen_at) VALUES (?, ?, ?, ?);');
-const stmtUpdateSessionSeen = db.prepare('UPDATE sessions SET last_seen_at = ? WHERE token = ?;');
+    await dbClient.execute(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        must_change_password INTEGER NOT NULL DEFAULT 1,
+        updated_at INTEGER NOT NULL
+      );
+    `);
 
-const stmtGetActiveEntries = db.prepare("SELECT id, author_device_id AS authorDeviceId, content, entry_type AS entryType, media_url AS mediaUrl, created_at AS createdAt, status FROM entries WHERE status IN ('ACTIVE', 'VIEWED') ORDER BY created_at ASC;");
-const stmtGetEntryById = db.prepare('SELECT * FROM entries WHERE id = ? LIMIT 1;');
-const stmtInsertEntry = db.prepare('INSERT OR IGNORE INTO entries (id, author_device_id, content, entry_type, media_url, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?);');
-const stmtMarkEntryViewed = db.prepare("UPDATE entries SET status = 'VIEWED', viewed_by_device_id = ?, viewed_at = ? WHERE id = ? AND author_device_id != ? AND status = 'ACTIVE';");
+    await dbClient.execute(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL
+      );
+    `);
 
-const stmtInsertViewSession = db.prepare('INSERT OR REPLACE INTO view_sessions (device_id, entry_id, started_at) VALUES (?, ?, ?);');
-const stmtGetViewSessionsForDevice = db.prepare('SELECT entry_id FROM view_sessions WHERE device_id = ?;');
-const stmtDeleteViewSession = db.prepare('DELETE FROM view_sessions WHERE device_id = ? AND entry_id = ?;');
-const stmtDeleteEntry = db.prepare('DELETE FROM entries WHERE id = ? AND author_device_id != ?;');
-const stmtPurgeOrphanedViewed = db.prepare("DELETE FROM entries WHERE status = 'VIEWED' AND viewed_at IS NOT NULL AND viewed_at < ?;");
+    await dbClient.execute(`
+      CREATE TABLE IF NOT EXISTS entries (
+        id TEXT PRIMARY KEY,
+        author_device_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        entry_type TEXT NOT NULL DEFAULT 'text',
+        media_url TEXT,
+        created_at INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        viewed_by_device_id TEXT,
+        viewed_at INTEGER,
+        consumed_at INTEGER
+      );
+    `);
 
-// Push Subscription Prepared Statements
-const stmtInsertPushSub = db.prepare(`
-  INSERT OR REPLACE INTO push_subscriptions 
-    (endpoint, device_id, p256dh, auth, recipient_name, created_at, last_used_at) 
-  VALUES (?, ?, ?, ?, ?, ?, ?);
-`);
-const stmtGetOtherPushSubs = db.prepare('SELECT * FROM push_subscriptions WHERE device_id != ?;');
-const stmtGetDevicePushSubs = db.prepare('SELECT * FROM push_subscriptions WHERE device_id = ?;');
-const stmtDeletePushSub = db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?;');
-const stmtUpdatePushSubUsed = db.prepare('UPDATE push_subscriptions SET last_used_at = ? WHERE endpoint = ?;');
+    await dbClient.execute(`
+      CREATE TABLE IF NOT EXISTS view_sessions (
+        device_id TEXT NOT NULL,
+        entry_id TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        PRIMARY KEY (device_id, entry_id)
+      );
+    `);
+
+    await dbClient.execute(`
+      CREATE TABLE IF NOT EXISTS push_subscriptions (
+        endpoint TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        p256dh TEXT NOT NULL,
+        auth TEXT NOT NULL,
+        recipient_name TEXT,
+        created_at INTEGER NOT NULL,
+        last_used_at INTEGER NOT NULL
+      );
+    `);
+
+    await dbClient.execute('CREATE INDEX IF NOT EXISTS idx_entries_status ON entries(status, created_at);');
+    await dbClient.execute('CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);');
+    await dbClient.execute('CREATE INDEX IF NOT EXISTS idx_push_device ON push_subscriptions(device_id);');
+
+    // Safe Non-destructive Migrations
+    try {
+      await dbClient.execute("ALTER TABLE entries ADD COLUMN entry_type TEXT DEFAULT 'text';");
+    } catch (e) {
+      // Column already exists
+    }
+    try {
+      await dbClient.execute("ALTER TABLE entries ADD COLUMN media_url TEXT;");
+    } catch (e) {
+      // Column already exists
+    }
+
+    // Seed or migrate bootstrap credentials
+    const existingUserRes = await dbClient.execute({
+      sql: 'SELECT * FROM users WHERE username = ? LIMIT 1;',
+      args: ['diary']
+    });
+
+    if (existingUserRes.rows.length === 0) {
+      // Check legacy JSON store if upgrading
+      const legacyJson = path.join(DATA_DIR, 'diary_store.json');
+      if (fs.existsSync(legacyJson)) {
+        try {
+          const raw = fs.readFileSync(legacyJson, 'utf8');
+          const parsed = JSON.parse(raw);
+          if (parsed.user && parsed.user.passwordHash) {
+            await dbClient.execute({
+              sql: 'INSERT INTO users (username, password_hash, must_change_password, updated_at) VALUES (?, ?, ?, ?);',
+              args: [
+                parsed.user.username || 'diary',
+                parsed.user.passwordHash,
+                parsed.user.mustChangePassword ? 1 : 0,
+                Date.now()
+              ]
+            });
+            console.log('[Daily Dairy DB] Migrated user from legacy json store.');
+          }
+          if (parsed.entries && typeof parsed.entries === 'object') {
+            for (const e of Object.values(parsed.entries)) {
+              if (e.status === 'ACTIVE' || e.status === 'VIEWED') {
+                await dbClient.execute({
+                  sql: 'INSERT OR IGNORE INTO entries (id, author_device_id, content, entry_type, media_url, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?);',
+                  args: [e.id, e.authorDeviceId, e.content, e.entryType || 'text', e.mediaUrl || null, e.createdAt, e.status]
+                });
+              }
+            }
+            console.log('[Daily Dairy DB] Migrated active entries from legacy json store.');
+          }
+        } catch (err) {
+          console.warn('[Daily Dairy DB] Legacy migration notice:', err.message);
+        }
+      }
+
+      // Check again after legacy migration attempt
+      const checkAgain = await dbClient.execute({
+        sql: 'SELECT * FROM users WHERE username = ? LIMIT 1;',
+        args: ['diary']
+      });
+
+      if (checkAgain.rows.length === 0) {
+        const defaultPass = process.env.BOOTSTRAP_PASSWORD || 'ChangeThisOnFirstLogin!';
+        const salt = bcrypt.genSaltSync(12);
+        const hash = bcrypt.hashSync(defaultPass, salt);
+        await dbClient.execute({
+          sql: 'INSERT INTO users (username, password_hash, must_change_password, updated_at) VALUES (?, ?, ?, ?);',
+          args: ['diary', hash, 1, Date.now()]
+        });
+        if (process.env.NODE_ENV === 'production' && !process.env.BOOTSTRAP_PASSWORD) {
+          console.warn('[Daily Dairy Security] WARNING: Initialized bootstrap account with default password. Mandating immediate password change on first login.');
+        } else {
+          console.log('[Daily Dairy DB] Initialized bootstrap account (mandatory password change on first login enabled).');
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Daily Dairy DB] Critical error initializing database schema:', err.message);
+    throw err;
+  }
+}
 
 // Setup Web Push VAPID Configuration
 const VAPID_KEYS_FILE = path.join(DATA_DIR, 'vapid_keys.json');
@@ -167,50 +229,6 @@ try {
   console.warn('[Push] Failed to initialize VAPID details:', err.message);
 }
 
-// Seed or migrate data
-function initDatabase() {
-  const existingUser = stmtGetUser.get('diary');
-  if (!existingUser) {
-    // Check legacy JSON store if upgrading
-    const legacyJson = path.join(DATA_DIR, 'diary_store.json');
-    if (fs.existsSync(legacyJson)) {
-      try {
-        const raw = fs.readFileSync(legacyJson, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (parsed.user && parsed.user.passwordHash) {
-          stmtInsertUser.run(
-            parsed.user.username || 'diary',
-            parsed.user.passwordHash,
-            parsed.user.mustChangePassword ? 1 : 0,
-            Date.now()
-          );
-          console.log('[Daily Dairy DB] Migrated user from legacy json store.');
-        }
-        if (parsed.entries && typeof parsed.entries === 'object') {
-          for (const e of Object.values(parsed.entries)) {
-            if (e.status === 'ACTIVE' || e.status === 'VIEWED') {
-              stmtInsertEntry.run(e.id, e.authorDeviceId, e.content, e.entryType || 'text', e.mediaUrl || null, e.createdAt, e.status);
-            }
-          }
-          console.log('[Daily Dairy DB] Migrated active entries from legacy json store.');
-        }
-      } catch (err) {
-        console.warn('[Daily Dairy DB] Legacy migration notice:', err.message);
-      }
-    }
-
-    // If still no user, insert default bootstrap credentials
-    const checkAgain = stmtGetUser.get('diary');
-    if (!checkAgain) {
-      const defaultPass = process.env.BOOTSTRAP_PASSWORD || 'ChangeThisOnFirstLogin!';
-      const salt = bcrypt.genSaltSync(12);
-      const hash = bcrypt.hashSync(defaultPass, salt);
-      stmtInsertUser.run('diary', hash, 1, Date.now());
-      console.log('[Daily Dairy DB] Initialized with bootstrap credentials (diary / ChangeThisOnFirstLogin!)');
-    }
-  }
-}
-
 // Real-Time Server-Sent Events (SSE) Broadcast Engine
 const sseClients = new Map(); // clientId -> { res, deviceId }
 
@@ -225,14 +243,13 @@ function broadcastSSE(eventType, data) {
   }
 }
 
-// Two-Person Server-Side Presence Engine
-// Tracks deviceId -> { lastSeen: number, sseActive: boolean }
-const activeDevices = new Map();
+// Presence State Engine
+const activeDevices = new Map(); // deviceId -> { lastSeen, sseCount, sseActive }
+const OFFLINE_TIMEOUT_MS = 25000;
 let lastBroadcastPresence = null;
 
 function calculatePresence() {
   const now = Date.now();
-  const OFFLINE_TIMEOUT_MS = 25000;
   const onlineDeviceIds = [];
 
   for (const [devId, info] of activeDevices.entries()) {
@@ -241,10 +258,6 @@ function calculatePresence() {
     }
   }
 
-  // Two-person diary rule:
-  // If 2 or more distinct devices are active -> both_online
-  // If 1 device is active -> one_online
-  // If 0 devices -> all_offline
   const bothOnline = onlineDeviceIds.length >= 2;
   const status = bothOnline ? 'both_online' : (onlineDeviceIds.length === 1 ? 'one_online' : 'all_offline');
 
@@ -272,16 +285,19 @@ setInterval(() => {
   checkAndBroadcastPresence();
 }, 4000);
 
-// Private Push Notification Dispatcher (Discreet & Privacy-Guaranteed)
+// Private Push Notification Dispatcher
 async function notifySubscribersOnNewEntry(entry) {
   const authorDeviceId = entry.authorDeviceId || entry.author_device_id;
   const entryType = entry.entryType || entry.entry_type || 'text';
   const entryId = entry.id;
 
-  // Query registered push subscriptions belonging to devices OTHER than the sender
   let subscribers = [];
   try {
-    subscribers = stmtGetOtherPushSubs.all(authorDeviceId);
+    const subRes = await dbClient.execute({
+      sql: 'SELECT * FROM push_subscriptions WHERE device_id != ?;',
+      args: [authorDeviceId]
+    });
+    subscribers = subRes.rows;
   } catch (err) {
     console.warn('[Push] Error querying push subscribers:', err.message);
     return;
@@ -294,7 +310,6 @@ async function notifySubscribersOnNewEntry(entry) {
   const deliveries = subscribers.map(async (sub) => {
     const recipientName = sub.recipient_name ? sub.recipient_name.trim() : '';
 
-    // Privacy-safe defaults: NEVER expose entry text or attachment contents on lock screen
     let title = 'Daily Dairy ❤️ — You have a new entry.';
     let body = 'A private entry was added to your shared notebook.';
 
@@ -332,13 +347,18 @@ async function notifySubscribersOnNewEntry(entry) {
 
     try {
       await webpush.sendNotification(pushSubscription, payload, {
-        TTL: 24 * 3600 // Expire in 24 hours if unreached
+        TTL: 24 * 3600
       });
-      stmtUpdatePushSubUsed.run(Date.now(), sub.endpoint);
+      await dbClient.execute({
+        sql: 'UPDATE push_subscriptions SET last_used_at = ? WHERE endpoint = ?;',
+        args: [Date.now(), sub.endpoint]
+      });
     } catch (err) {
-      // 404 or 410 indicates expired or unregistered subscription: prune safely
       if (err.statusCode === 404 || err.statusCode === 410) {
-        stmtDeletePushSub.run(sub.endpoint);
+        await dbClient.execute({
+          sql: 'DELETE FROM push_subscriptions WHERE endpoint = ?;',
+          args: [sub.endpoint]
+        }).catch(() => {});
         console.log('[Push] Pruned expired push subscription for endpoint:', sub.endpoint.substring(0, 32));
       } else {
         console.warn('[Push] Notification dispatch note:', err.statusCode || err.message);
@@ -354,10 +374,9 @@ app.set('trust proxy', 1);
 
 // Security Headers & CORS
 app.use(helmet({
-  contentSecurityPolicy: false // Allow inline SVG / stylesheet for rich notebook styling
+  contentSecurityPolicy: false
 }));
 app.use(cors());
-// Increased body limit to 15MB to comfortably support voice notes and media attachments
 app.use(express.json({ limit: '15mb' }));
 app.use(express.text({ type: ['text/plain', 'application/json'], limit: '1mb' }));
 app.use((req, res, next) => {
@@ -380,7 +399,7 @@ const loginLimiter = rateLimit({
 });
 
 // Authentication Middleware
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const authHeader = req.headers['authorization'];
   let token = null;
 
@@ -396,58 +415,96 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ success: false, error: 'Unauthorized: Missing token' });
   }
 
-  const session = stmtGetSession.get(token);
-  if (!session) {
-    return res.status(401).json({ success: false, error: 'Unauthorized: Session invalid or expired' });
-  }
+  try {
+    const sessionRes = await dbClient.execute({
+      sql: 'SELECT * FROM sessions WHERE token = ? LIMIT 1;',
+      args: [token]
+    });
+    const session = sessionRes.rows[0];
+    if (!session) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Session invalid or expired' });
+    }
 
-  stmtUpdateSessionSeen.run(Date.now(), token);
-  req.session = session;
-  req.deviceId = req.headers['x-device-id'] || req.query.deviceId || (req.body && req.body.deviceId) || session.device_id;
-  next();
+    await dbClient.execute({
+      sql: 'UPDATE sessions SET last_seen_at = ? WHERE token = ?;',
+      args: [Date.now(), token]
+    });
+
+    req.session = session;
+    req.deviceId = req.headers['x-device-id'] || req.query.deviceId || (req.body && req.body.deviceId) || session.device_id;
+    next();
+  } catch (err) {
+    console.error('[Daily Dairy Auth] Session check error:', err.message);
+    res.status(500).json({ success: false, error: 'Internal authentication error' });
+  }
 }
 
 // --- API ROUTES ---
 
-// Health & Persistence Diagnostic
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    database: 'sqlite_acid',
-    push_configured: Boolean(vapidKeys && vapidKeys.publicKey),
-    uptime: process.uptime(),
-    timestamp: Date.now()
-  });
+// Health & Persistence Diagnostic (Cloud LB / Render / Container monitor)
+app.get(['/health', '/api/health'], async (req, res) => {
+  try {
+    await dbClient.execute('SELECT 1 as alive;');
+    res.json({
+      status: 'healthy',
+      ok: true,
+      service: 'daily-dairy',
+      database: isTurso ? 'turso_cloud_libsql' : 'sqlite_libsql_acid',
+      push_configured: Boolean(vapidKeys && vapidKeys.publicKey),
+      uptime: Math.floor(process.uptime()),
+      timestamp: Date.now()
+    });
+  } catch (err) {
+    res.status(503).json({
+      status: 'unhealthy',
+      ok: false,
+      service: 'daily-dairy',
+      error: 'Database check failed: ' + err.message,
+      timestamp: Date.now()
+    });
+  }
 });
 
-// 1. Login (supports simultaneous active devices under same account)
-app.post('/api/auth/login', loginLimiter, (req, res) => {
+// 1. Login
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
   const { username, password, deviceId } = req.body;
   if (!username || !password) {
     return res.status(400).json({ success: false, error: 'Username and password required' });
   }
 
-  const user = stmtGetUser.get(username.trim());
-  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
-    return res.status(401).json({ success: false, error: 'Invalid username or password' });
+  try {
+    const userRes = await dbClient.execute({
+      sql: 'SELECT * FROM users WHERE username = ? LIMIT 1;',
+      args: [username.trim()]
+    });
+    const user = userRes.rows[0];
+    if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+      return res.status(401).json({ success: false, error: 'Invalid username or password' });
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const assignedDeviceId = deviceId || ('dev_' + crypto.randomBytes(8).toString('hex'));
+    const now = Date.now();
+
+    await dbClient.execute({
+      sql: 'INSERT OR REPLACE INTO sessions (token, device_id, created_at, last_seen_at) VALUES (?, ?, ?, ?);',
+      args: [token, assignedDeviceId, now, now]
+    });
+
+    res.json({
+      success: true,
+      token: token,
+      deviceId: assignedDeviceId,
+      mustChangePassword: Boolean(user.must_change_password)
+    });
+  } catch (err) {
+    console.error('[Daily Dairy Auth] Login error:', err.message);
+    res.status(500).json({ success: false, error: 'Internal server error during login' });
   }
-
-  const token = crypto.randomBytes(32).toString('hex');
-  const assignedDeviceId = deviceId || ('dev_' + crypto.randomBytes(8).toString('hex'));
-  const now = Date.now();
-
-  stmtInsertSession.run(token, assignedDeviceId, now, now);
-
-  res.json({
-    success: true,
-    token: token,
-    deviceId: assignedDeviceId,
-    mustChangePassword: Boolean(user.must_change_password)
-  });
 });
 
 // 2. Change Password
-app.post('/api/auth/change-password', requireAuth, (req, res) => {
+app.post('/api/auth/change-password', requireAuth, async (req, res) => {
   const { newPassword } = req.body;
   if (!newPassword || newPassword.length < 8) {
     return res.status(400).json({ success: false, error: 'Password must be at least 8 characters long' });
@@ -455,19 +512,29 @@ app.post('/api/auth/change-password', requireAuth, (req, res) => {
 
   const salt = bcrypt.genSaltSync(12);
   const hash = bcrypt.hashSync(newPassword, salt);
-  stmtUpdatePassword.run(hash, 0, Date.now(), 'diary');
-
-  res.json({ success: true, message: 'Password updated successfully' });
+  try {
+    await dbClient.execute({
+      sql: 'UPDATE users SET password_hash = ?, must_change_password = 0, updated_at = ? WHERE username = ?;',
+      args: [hash, Date.now(), 'diary']
+    });
+    res.json({ success: true, message: 'Password updated successfully' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to update password' });
+  }
 });
 
-// 3. Fetch Active Entries (Authoritative list from SQLite)
-app.get('/api/entries', requireAuth, (req, res) => {
-  const activeEntries = stmtGetActiveEntries.all();
-  res.json(activeEntries);
+// 3. Fetch Active Entries
+app.get('/api/entries', requireAuth, async (req, res) => {
+  try {
+    const rs = await dbClient.execute("SELECT id, author_device_id AS authorDeviceId, content, entry_type AS entryType, media_url AS mediaUrl, created_at AS createdAt, status FROM entries WHERE status IN ('ACTIVE', 'VIEWED') ORDER BY created_at ASC;");
+    res.json(rs.rows);
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to retrieve entries: ' + err.message });
+  }
 });
 
-// 4. Create Entry (Central authoritative store, Real-Time SSE & Push Delivery)
-app.post('/api/entries', requireAuth, (req, res) => {
+// 4. Create Entry
+app.post('/api/entries', requireAuth, async (req, res) => {
   const { id, content, authorDeviceId, createdAt, entryType, mediaUrl } = req.body;
   if (!content || !content.trim()) {
     return res.status(400).json({ success: false, error: 'Entry content is required' });
@@ -475,72 +542,91 @@ app.post('/api/entries', requireAuth, (req, res) => {
 
   const cleanType = entryType || 'text';
   const cleanMedia = mediaUrl || null;
-
   const entryId = id || crypto.randomUUID();
   const devId = authorDeviceId || req.deviceId;
   const createdTimestamp = createdAt || Date.now();
 
-  // Insert into SQLite database with ACID durability
-  const existing = stmtGetEntryById.get(entryId);
-  if (existing) {
-    return res.json({
-      success: true,
-      id: entryId,
-      entry: {
-        id: existing.id,
-        authorDeviceId: existing.author_device_id,
-        content: existing.content,
-        entryType: existing.entry_type || 'text',
-        mediaUrl: existing.media_url || null,
-        createdAt: existing.created_at,
-        status: existing.status
-      },
-      deduplicated: true
+  try {
+    const existingRes = await dbClient.execute({
+      sql: 'SELECT * FROM entries WHERE id = ? LIMIT 1;',
+      args: [entryId]
     });
+    const existing = existingRes.rows[0];
+    if (existing) {
+      return res.json({
+        success: true,
+        id: entryId,
+        entry: {
+          id: existing.id,
+          authorDeviceId: existing.author_device_id,
+          content: existing.content,
+          entryType: existing.entry_type || 'text',
+          mediaUrl: existing.media_url || null,
+          createdAt: existing.created_at,
+          status: existing.status
+        },
+        deduplicated: true
+      });
+    }
+
+    await dbClient.execute({
+      sql: 'INSERT INTO entries (id, author_device_id, content, entry_type, media_url, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?);',
+      args: [entryId, devId, content.trim(), cleanType, cleanMedia, createdTimestamp, 'ACTIVE']
+    });
+
+    const newEntry = {
+      id: entryId,
+      authorDeviceId: devId,
+      content: content.trim(),
+      entryType: cleanType,
+      mediaUrl: cleanMedia,
+      createdAt: createdTimestamp,
+      status: 'ACTIVE'
+    };
+
+    broadcastSSE('entry_created', newEntry);
+
+    notifySubscribersOnNewEntry(newEntry).catch(err => {
+      console.warn('[Push] Background push error:', err.message);
+    });
+
+    res.json({ success: true, id: entryId, entry: newEntry });
+  } catch (err) {
+    console.error('[Daily Dairy DB] Entry creation error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to create entry' });
   }
-
-  stmtInsertEntry.run(entryId, devId, content.trim(), cleanType, cleanMedia, createdTimestamp, 'ACTIVE');
-
-  const newEntry = {
-    id: entryId,
-    authorDeviceId: devId,
-    content: content.trim(),
-    entryType: cleanType,
-    mediaUrl: cleanMedia,
-    createdAt: createdTimestamp,
-    status: 'ACTIVE'
-  };
-
-  // Broadcast to other phone in real-time via SSE!
-  broadcastSSE('entry_created', newEntry);
-
-  // Dispatch private background push notification to recipient's phone
-  notifySubscribersOnNewEntry(newEntry).catch(err => {
-    console.warn('[Push] Background push error:', err.message);
-  });
-
-  res.json({ success: true, id: entryId, entry: newEntry });
 });
 
-// 5. Start/Report Viewing Session (When recipient is visibly reading on screen)
-app.post('/api/entries/view-session/start', requireAuth, (req, res) => {
+// 5. Start/Report Viewing Session
+app.post('/api/entries/view-session/start', requireAuth, async (req, res) => {
   const { deviceId, entryIds } = req.body;
   const currentDev = deviceId || req.deviceId;
 
-  if (Array.isArray(entryIds)) {
+  if (Array.isArray(entryIds) && entryIds.length > 0) {
     const now = Date.now();
+    const batch = [];
     entryIds.forEach(id => {
-      // Mark entry as VIEWED in SQLite if authored by the OTHER device
-      stmtMarkEntryViewed.run(currentDev, now, id, currentDev);
-      stmtInsertViewSession.run(currentDev, id, now);
+      batch.push({
+        sql: "UPDATE entries SET status = 'VIEWED', viewed_by_device_id = ?, viewed_at = ? WHERE id = ? AND author_device_id != ? AND status = 'ACTIVE';",
+        args: [currentDev, now, id, currentDev]
+      });
+      batch.push({
+        sql: 'INSERT OR REPLACE INTO view_sessions (device_id, entry_id, started_at) VALUES (?, ?, ?);',
+        args: [currentDev, id, now]
+      });
     });
+    try {
+      await dbClient.batch(batch, 'write');
+    } catch (err) {
+      console.warn('[Daily Dairy DB] View session update error:', err.message);
+    }
   }
 
   res.json({ success: true });
 });
 
-// 6. Consume/Delete Entries (Strict Read-and-Leave rule)
-app.post('/api/entries/consume', requireAuth, (req, res) => {
+// 6. Consume/Delete Entries (Atomic Read-and-Leave rule)
+app.post('/api/entries/consume', requireAuth, async (req, res) => {
   const { deviceId, entryIds } = req.body;
   const currentDev = deviceId || req.deviceId;
 
@@ -549,34 +635,64 @@ app.post('/api/entries/consume', requireAuth, (req, res) => {
   if (Array.isArray(entryIds) && entryIds.length > 0) {
     candidateIds = entryIds;
   } else {
-    const rows = stmtGetViewSessionsForDevice.all(currentDev);
-    candidateIds = rows.map(r => r.entry_id);
+    try {
+      const viewRows = await dbClient.execute({
+        sql: 'SELECT entry_id FROM view_sessions WHERE device_id = ?;',
+        args: [currentDev]
+      });
+      candidateIds = viewRows.rows.map(r => r.entry_id);
+    } catch (err) {
+      console.error('[Daily Dairy DB] Error fetching view sessions:', err.message);
+      return res.status(500).json({ success: false, error: 'Failed to query view sessions' });
+    }
   }
 
-  let consumedCount = 0;
+  if (candidateIds.length === 0) {
+    return res.json({ success: true, consumedCount: 0, consumedIds: [] });
+  }
+
+  const batchStatements = [];
   const deletedIds = [];
 
-  // Atomic deletion of consumed entries authored by the other device
-  candidateIds.forEach(id => {
-    const entry = stmtGetEntryById.get(id);
-    if (entry && entry.author_device_id !== currentDev) {
-      stmtDeleteEntry.run(id, currentDev);
-      stmtDeleteViewSession.run(currentDev, id);
-      deletedIds.push(id);
-      consumedCount++;
+  for (const id of candidateIds) {
+    try {
+      const entryRes = await dbClient.execute({
+        sql: 'SELECT * FROM entries WHERE id = ? LIMIT 1;',
+        args: [id]
+      });
+      const entry = entryRes.rows[0];
+      // SENDER IMMUNITY: Recipient only consumes entries authored by the other device!
+      if (entry && entry.author_device_id !== currentDev) {
+        batchStatements.push({
+          sql: 'DELETE FROM entries WHERE id = ? AND author_device_id != ?;',
+          args: [id, currentDev]
+        });
+        batchStatements.push({
+          sql: 'DELETE FROM view_sessions WHERE device_id = ? AND entry_id = ?;',
+          args: [currentDev, id]
+        });
+        deletedIds.push(id);
+      }
+    } catch (err) {
+      console.warn('[Daily Dairy DB] Error checking entry during consume:', err.message);
     }
-  });
-
-  if (consumedCount > 0) {
-    // Broadcast real-time deletion to both devices
-    broadcastSSE('entry_consumed', { consumedIds: deletedIds });
   }
 
-  res.json({ success: true, consumedCount, consumedIds: deletedIds });
+  if (batchStatements.length > 0) {
+    try {
+      await dbClient.batch(batchStatements, 'write');
+      broadcastSSE('entry_consumed', { consumedIds: deletedIds });
+    } catch (err) {
+      console.error('[Daily Dairy DB] Error in atomic consume batch transaction:', err.message);
+      return res.status(500).json({ success: false, error: 'Database transaction error during consume' });
+    }
+  }
+
+  res.json({ success: true, consumedCount: deletedIds.length, consumedIds: deletedIds });
 });
 
 // 7. Real-Time Server-Sent Events (SSE) Stream
-app.get('/api/events', requireAuth, (req, res) => {
+app.get('/api/events', requireAuth, async (req, res) => {
   const clientId = crypto.randomUUID();
   const currentDev = req.deviceId;
 
@@ -587,8 +703,12 @@ app.get('/api/events', requireAuth, (req, res) => {
     'X-Accel-Buffering': 'no'
   });
 
-  const activeEntries = stmtGetActiveEntries.all();
-  res.write(`event: init\ndata: ${JSON.stringify(activeEntries)}\n\n`);
+  try {
+    const rs = await dbClient.execute("SELECT id, author_device_id AS authorDeviceId, content, entry_type AS entryType, media_url AS mediaUrl, created_at AS createdAt, status FROM entries WHERE status IN ('ACTIVE', 'VIEWED') ORDER BY created_at ASC;");
+    res.write(`event: init\ndata: ${JSON.stringify(rs.rows)}\n\n`);
+  } catch (err) {
+    res.write(`event: init\ndata: []\n\n`);
+  }
 
   // Register device presence
   const existing = activeDevices.get(currentDev) || { sseCount: 0 };
@@ -629,7 +749,6 @@ app.get('/api/events', requireAuth, (req, res) => {
 
 // --- TWO-PERSON PRESENCE API ENDPOINTS ---
 
-// Heartbeat from active PWA client
 app.post('/api/presence/heartbeat', requireAuth, (req, res) => {
   const currentDev = req.body.deviceId || req.deviceId;
   const existing = activeDevices.get(currentDev) || { sseCount: 0 };
@@ -638,7 +757,6 @@ app.post('/api/presence/heartbeat', requireAuth, (req, res) => {
   res.json({ success: true, presence: calculatePresence() });
 });
 
-// Explicit leave signal on background or exit
 app.post('/api/presence/leave', requireAuth, (req, res) => {
   const currentDev = req.body.deviceId || req.deviceId;
   activeDevices.delete(currentDev);
@@ -646,14 +764,12 @@ app.post('/api/presence/leave', requireAuth, (req, res) => {
   res.json({ success: true, presence: calculatePresence() });
 });
 
-// Fetch current presence state
 app.get('/api/presence', requireAuth, (req, res) => {
   res.json({ success: true, presence: calculatePresence() });
 });
 
 // --- PUSH NOTIFICATION API ENDPOINTS ---
 
-// 8. Get Public VAPID Key (Authenticated)
 app.get('/api/push/public-key', requireAuth, (req, res) => {
   res.json({
     success: true,
@@ -661,8 +777,7 @@ app.get('/api/push/public-key', requireAuth, (req, res) => {
   });
 });
 
-// 9. Subscribe Device to Push Notifications
-app.post('/api/push/subscribe', requireAuth, (req, res) => {
+app.post('/api/push/subscribe', requireAuth, async (req, res) => {
   const { subscription, deviceId, recipientName } = req.body;
   if (!subscription || !subscription.endpoint || !subscription.keys || !subscription.keys.p256dh || !subscription.keys.auth) {
     return res.status(400).json({ success: false, error: 'Valid PushSubscription with p256dh and auth keys required' });
@@ -673,83 +788,117 @@ app.post('/api/push/subscribe', requireAuth, (req, res) => {
   const now = Date.now();
 
   try {
-    stmtInsertPushSub.run(
-      subscription.endpoint,
-      currentDev,
-      subscription.keys.p256dh,
-      subscription.keys.auth,
-      cleanRecipientName,
-      now,
-      now
-    );
-    res.json({ success: true, message: 'Push subscription registered securely' });
+    await dbClient.execute({
+      sql: `
+        INSERT OR REPLACE INTO push_subscriptions 
+          (endpoint, device_id, p256dh, auth, recipient_name, created_at, last_used_at) 
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+      `,
+      args: [subscription.endpoint, currentDev, subscription.keys.p256dh, subscription.keys.auth, cleanRecipientName, now, now]
+    });
+    res.json({ success: true, message: 'Push notification subscription registered successfully' });
   } catch (err) {
-    res.status(500).json({ success: false, error: 'Failed to record push subscription: ' + err.message });
+    res.status(500).json({ success: false, error: 'Failed to save push subscription: ' + err.message });
   }
 });
 
-// 10. Unsubscribe Device from Push Notifications
-app.post('/api/push/unsubscribe', requireAuth, (req, res) => {
+app.post('/api/push/unsubscribe', requireAuth, async (req, res) => {
   const { endpoint } = req.body;
   if (!endpoint) {
-    return res.status(400).json({ success: false, error: 'Endpoint required' });
+    return res.status(400).json({ success: false, error: 'Subscription endpoint required' });
   }
 
   try {
-    stmtDeletePushSub.run(endpoint);
+    await dbClient.execute({
+      sql: 'DELETE FROM push_subscriptions WHERE endpoint = ?;',
+      args: [endpoint]
+    });
     res.json({ success: true, message: 'Push subscription removed successfully' });
   } catch (err) {
     res.status(500).json({ success: false, error: 'Failed to remove push subscription: ' + err.message });
   }
 });
 
-// 11. Send Verified Test Notification to This Device
 app.post('/api/push/test', requireAuth, async (req, res) => {
   const currentDev = req.body.deviceId || req.deviceId;
   const recipientName = req.body.recipientName ? req.body.recipientName.trim() : '';
-  const subs = stmtGetDevicePushSubs.all(currentDev);
 
-  if (!subs || subs.length === 0) {
-    return res.status(404).json({
-      success: false,
-      error: 'No active push subscription registered on this device yet. Please enable push notifications first.'
+  try {
+    const subRes = await dbClient.execute({
+      sql: 'SELECT * FROM push_subscriptions WHERE device_id = ?;',
+      args: [currentDev]
     });
-  }
+    const subs = subRes.rows;
 
-  let sentCount = 0;
-  for (const sub of subs) {
-    const pushSubscription = {
-      endpoint: sub.endpoint,
-      keys: { p256dh: sub.p256dh, auth: sub.auth }
-    };
-    const title = recipientName ? `${recipientName}, test from Daily Dairy ❤️` : 'Daily Dairy ❤️ — Test notification';
-    const payload = JSON.stringify({
-      title,
-      body: 'Private push notifications are active on this phone.',
-      icon: '/icon-192.png',
-      badge: '/icon-192.png',
-      tag: 'test_' + Date.now(),
-      data: { url: '/' }
-    });
+    if (!subs || subs.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'No active push subscription registered on this device yet. Please enable push notifications first.'
+      });
+    }
 
-    try {
-      await webpush.sendNotification(pushSubscription, payload, { TTL: 60 });
-      sentCount++;
-    } catch (err) {
-      if (err.statusCode === 404 || err.statusCode === 410) {
-        stmtDeletePushSub.run(sub.endpoint);
+    let sentCount = 0;
+    for (const sub of subs) {
+      const pushSubscription = {
+        endpoint: sub.endpoint,
+        keys: { p256dh: sub.p256dh, auth: sub.auth }
+      };
+      const title = recipientName ? `${recipientName}, test from Daily Dairy ❤️` : 'Daily Dairy ❤️ — Test notification';
+      const payload = JSON.stringify({
+        title,
+        body: 'Private push notifications are active on this phone.',
+        icon: '/icon-192.png',
+        badge: '/icon-192.png',
+        tag: 'test_' + Date.now(),
+        data: { url: '/' }
+      });
+
+      try {
+        await webpush.sendNotification(pushSubscription, payload, { TTL: 60 });
+        sentCount++;
+      } catch (err) {
+        if (err.statusCode === 404 || err.statusCode === 410) {
+          await dbClient.execute({
+            sql: 'DELETE FROM push_subscriptions WHERE endpoint = ?;',
+            args: [sub.endpoint]
+          }).catch(() => {});
+        }
       }
     }
-  }
 
-  res.json({ success: true, sentCount, message: `Dispatched test push to ${sentCount} device subscription(s).` });
+    res.json({ success: true, sentCount, message: `Dispatched test push to ${sentCount} device subscription(s).` });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Test push failed: ' + err.message });
+  }
+});
+
+// 12. Backup & Export Endpoint (Authenticated)
+app.get('/api/entries/export-backup', requireAuth, async (req, res) => {
+  try {
+    const rs = await dbClient.execute("SELECT id, author_device_id AS authorDeviceId, content, entry_type AS entryType, media_url AS mediaUrl, created_at AS createdAt, status FROM entries WHERE status IN ('ACTIVE', 'VIEWED') ORDER BY created_at ASC;");
+    const entries = rs.rows;
+    const backupData = {
+      version: '1.0.0',
+      exportedAt: Date.now(),
+      exportedByDevice: req.deviceId,
+      totalEntries: entries.length,
+      entries: entries
+    };
+    res.setHeader('Content-Disposition', `attachment; filename="daily_dairy_backup_${Date.now()}.json"`);
+    res.json(backupData);
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to generate backup export: ' + err.message });
+  }
 });
 
 // Auto-cleanup fallback: purge entries in VIEWED state for > 15 minutes
-setInterval(() => {
+setInterval(async () => {
   const cutoff = Date.now() - (15 * 60 * 1000);
   try {
-    stmtPurgeOrphanedViewed.run(cutoff);
+    await dbClient.execute({
+      sql: "DELETE FROM entries WHERE status = 'VIEWED' AND viewed_at IS NOT NULL AND viewed_at < ?;",
+      args: [cutoff]
+    });
   } catch (err) {
     // Handled safely
   }
@@ -765,14 +914,37 @@ if (fs.existsSync(PWA_DIR)) {
   });
 }
 
+// Graceful Shutdown
+async function handleGracefulShutdown(signal) {
+  console.log(`[Daily Dairy] Received ${signal}. Closing database connection...`);
+  try {
+    await dbClient.close();
+    console.log('[Daily Dairy DB] Database safely closed.');
+  } catch (e) {
+    console.warn('[Daily Dairy DB] Note during database close:', e.message);
+  }
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => handleGracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => handleGracefulShutdown('SIGINT'));
+
 // Start Server
-initDatabase();
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`===============================================`);
-  console.log(` Daily Dairy Production Backend (SQLite WAL)`);
-  console.log(` Web Push Notifications Enabled (VAPID)`);
-  console.log(` Listening on port ${PORT}`);
-  console.log(`===============================================`);
+const readyPromise = initDatabase().then(() => {
+  return new Promise((resolve) => {
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`===============================================`);
+      console.log(` Daily Dairy Production Backend (Turso / libSQL)`);
+      console.log(` Web Push Notifications Enabled (VAPID)`);
+      console.log(` Listening on 0.0.0.0:${PORT}`);
+      console.log(`===============================================`);
+      resolve();
+    });
+  });
+}).catch(err => {
+  console.error('[Daily Dairy Server] Failed to initialize database on startup:', err);
+  process.exit(1);
 });
 
+app.readyPromise = readyPromise;
 module.exports = app;

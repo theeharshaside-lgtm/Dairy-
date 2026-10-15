@@ -1,0 +1,9 @@
+app/
+.gradle/
+.build-outputs/
+node_modules/
+.git/
+*.keystore*
+*.aab
+*.apk
+.env

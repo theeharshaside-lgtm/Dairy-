@@ -5,10 +5,8 @@ services:
     plan: free
     buildCommand: npm install
     startCommand: npm start
-    disk:
-      name: daily-dairy-data
-      mountPath: /app/server/data
-      sizeGB: 1
     envVars:
+      - key: NODE_VERSION
+        value: 22.14.0
       - key: NODE_ENV
         value: production

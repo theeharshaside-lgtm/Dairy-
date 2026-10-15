@@ -8,7 +8,10 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-// Clean isolated test database file before test run
+// Strictly isolate test database: Never connect tests to remote production database
+delete process.env.TURSO_DATABASE_URL;
+delete process.env.TURSO_AUTH_TOKEN;
+
 const testDbFile = path.join(__dirname, 'data', 'test_diary.sqlite');
 if (fs.existsSync(testDbFile)) fs.unlinkSync(testDbFile);
 if (fs.existsSync(testDbFile + '-wal')) fs.unlinkSync(testDbFile + '-wal');
@@ -358,10 +361,33 @@ async function runTests() {
   }, { 'Authorization': `Bearer ${tokenP2}`, 'X-Device-Id': devP2 });
   assert(p2Leave.status === 200 && p2Leave.body.presence.bothOnline === false && p2Leave.body.presence.status === 'one_online', 'Phone 2 leaving sets status promptly back to one_online');
 
-  console.log('\n🌟 ALL 26 AUTOMATED LIFECYCLE, REALTIME, MEDIA, PUSH & PRESENCE TESTS PASSED PERFECTLY!\n');
+  // Test 27: Health check endpoints return 200 with status healthy and active database probe
+  const healthRes = await makeRequest('GET', '/health');
+  assert(healthRes.status === 200 && (healthRes.body.status === 'healthy' || healthRes.body.ok === true), 'Health endpoint /health returns 200 healthy');
+  const apiHealthRes = await makeRequest('GET', '/api/health');
+  assert(apiHealthRes.status === 200 && (apiHealthRes.body.status === 'healthy' || apiHealthRes.body.ok === true), 'Health endpoint /api/health returns 200 healthy');
+
+  // Test 28: Backup archive export endpoint returns valid JSON structure with 200
+  const backupRes = await makeRequest('GET', '/api/entries/export-backup', null, {
+    'Authorization': `Bearer ${tokenP1}`,
+    'X-Device-Id': devP1
+  });
+  assert(backupRes.status === 200 && Array.isArray(backupRes.body.entries), 'Authenticated backup export returns 200 and entries array');
+
+  // Test 29: Unauthorized request without token is rejected with 401
+  const unauthRes = await makeRequest('GET', '/api/entries/export-backup');
+  assert(unauthRes.status === 401, 'Unauthorized request without token is rejected with 401');
+
+  console.log('\n🌟 ALL 29 AUTOMATED LIFECYCLE, REALTIME, MEDIA, PUSH, PRESENCE, HEALTH, BACKUP & SECURITY CHECKS PASSED PERFECTLY!\n');
   process.exit(0);
 }
 
-// Wait 500ms for server to bind then run
-setTimeout(runTests, 500);
+// Wait for server readyPromise then run tests
+if (app.readyPromise) {
+  app.readyPromise.then(() => {
+    setTimeout(runTests, 100);
+  });
+} else {
+  setTimeout(runTests, 500);
+}
 

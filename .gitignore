@@ -16,3 +16,9 @@
 local.properties
 .env
 debug.keystore
+node_modules/
+server/data/*.sqlite*
+server/data/vapid_keys.json
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
